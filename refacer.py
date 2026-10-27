@@ -31,8 +31,8 @@ gc = __import__('gc')
 if sys.platform in ("win32", "win64"):
     if hasattr(os, "add_dll_directory"):
         try:
-            os.add_dll_directory(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin")
-            os.add_dll_directory(r"C:\Program Files\NVIDIA\CUDNN\v9.4\bin\12.6")
+            os.add_dll_directory(r"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin")
+            os.add_dll_directory(r"C:\\Program Files\\NVIDIA\\CUDNN\\v9.4\\bin\\12.6")
         except Exception as e:
             print(f"[INFO] Failed to add CUDA or CUDNN DLL directory: {e}")
             print("[INFO] This error can be ignored if running in CPU mode. Otherwise, make sure the paths are correct.")
@@ -55,47 +55,46 @@ class Refacer:
         self.__check_providers()
         self.total_mem = psutil.virtual_memory().total
         self.__init_apps()
-        
+       
     def _partial_face_blend(self, original_frame, swapped_frame, face):
         h_frame, w_frame = original_frame.shape[:2]
-    
+   
         x1, y1, x2, y2 = map(int, face.bbox)
         x1 = max(0, min(x1, w_frame-1))
         y1 = max(0, min(y1, h_frame-1))
         x2 = max(0, min(x2, w_frame))
         y2 = max(0, min(y2, h_frame))
-    
+   
         if x2 <= x1 or y2 <= y1:
             print(f"Invalid bbox: {x1},{y1},{x2},{y2}")
             return swapped_frame
-    
+   
         w = x2 - x1
         h = y2 - y1
         cutoff = int(h * (1.0 - self.blend_height_ratio))
-    
+   
         swap_crop = swapped_frame[y1:y2, x1:x2].copy()
         orig_crop = original_frame[y1:y2, x1:x2].copy()
-    
+   
         mask = np.ones((h, w, 3), dtype=np.float32)
         transition = 40
-    
+   
         if cutoff < h:
             blend_start = max(cutoff - transition // 2, 0)
             blend_end = min(cutoff + transition // 2, h)
-    
+   
             if blend_end > blend_start:
                 alpha = np.linspace(1.0, 0.0, blend_end - blend_start)[:, np.newaxis, np.newaxis]
                 mask[blend_start:blend_end, :, :] = alpha
             mask[blend_end:, :, :] = 0.0
-    
+   
         blended_crop = (swap_crop.astype(np.float32) * mask + orig_crop.astype(np.float32) * (1.0 - mask)).astype(np.uint8)
-    
+   
         blended_frame = swapped_frame.copy()
         blended_frame[y1:y2, x1:x2] = blended_crop
-    
+   
         return blended_frame
-    
-
+   
     def __download_with_progress(self, url, output_path):
         response = requests.get(url, stream=True)
         total_size = int(response.headers.get('content-length', 0))
@@ -113,63 +112,95 @@ class Refacer:
 
     def __check_providers(self):
         available_providers = rt.get_available_providers()
+        print(f"[Refacer] Available ONNX Runtime providers: {available_providers}")
 
         if self.force_cpu:
             self.providers = ['CPUExecutionProvider']
+            print("[Refacer] 🔴  force_cpu=True → using CPU only")
         else:
-            # Prefer faster execution providers in order
+            # Prefer faster execution providers in order – **exclude TensorRT** to avoid interference
             self.providers = []
             for p in ['CoreMLExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']:
                 if p in available_providers:
                     self.providers.append(p)
+            print(f"[Refacer] 🎯  Provider priority list: {self.providers}")
 
-        rt.set_default_logger_severity(4)
         self.sess_options = rt.SessionOptions()
         self.sess_options.execution_mode = rt.ExecutionMode.ORT_PARALLEL
         self.sess_options.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # Disable silent CPU fallback via SessionOptions if available (ORT >=1.22)
+        if hasattr(self.sess_options, 'add_config_entry'):
+            self.sess_options.add_config_entry('session.disable_cpu_ep_fallback', '1')
 
-        test_model = os.path.expanduser("~/.insightface/models/buffalo_l/det_10g.onnx")
-        try:
-            test_session = rt.InferenceSession(test_model, self.sess_options, providers=self.providers)
-            active_provider = test_session.get_providers()[0]
-        except Exception as e:
-            print(f"[ERROR] Failed to create test session: {e}")
-            active_provider = 'CPUExecutionProvider'
+        # ----- decide mode WITHOUT creating a test session (model not downloaded yet) -----
+        cuda_available = 'CUDAExecutionProvider' in self.providers
+        coreml_available = 'CoreMLExecutionProvider' in self.providers
 
-        if active_provider == 'CUDAExecutionProvider':
+        if cuda_available:
             self.mode = RefacerMode.CUDA
             self.use_num_cpus = 2
             self.sess_options.intra_op_num_threads = 1
-        elif active_provider == 'CoreMLExecutionProvider':
+            print("[Refacer] 🟢  GPU mode selected (CUDAExecutionProvider available)")
+        elif coreml_available:
             self.mode = RefacerMode.COREML
             self.use_num_cpus = max(mp.cpu_count() - 1, 1)
             self.sess_options.intra_op_num_threads = int(self.use_num_cpus / 2)
+            print("[Refacer] 🟢  CoreML mode selected")
         elif self.colab_performance:
             self.mode = RefacerMode.TENSORRT
             self.use_num_cpus = max(mp.cpu_count() - 1, 1)
             self.sess_options.intra_op_num_threads = int(self.use_num_cpus / 2)
+            print("[Refacer] 🟡  TensorRT/colab_performance mode selected")
         else:
             self.mode = RefacerMode.CPU
             self.use_num_cpus = max(mp.cpu_count() - 1, 1)
             self.sess_options.intra_op_num_threads = int(self.use_num_cpus / 2)
+            print("[Refacer] 🔴  CPU mode selected")
 
-        print(f"Available providers: {available_providers}")
-        print(f"Using providers: {self.providers}")
-        print(f"Active provider: {active_provider}")
-        print(f"Mode: {self.mode}")
+        print(f"[Refacer] Mode: {self.mode}")
+
+    def _make_session(self, model_path: str, name: str):
+        """Create InferenceSession with CUDA provider options; on failure, print error and fallback to CPU."""
+        # CUDA provider options – minimal set that works on Colab T4
+        cuda_opts = {
+            'device_id': 0,
+            'gpu_mem_limit': 4 * 1024 * 1024 * 1024,   # 4 GB
+            'arena_extend_strategy': 'kNextPowerOfTwo',
+            'cudnn_conv_algo_search': 'EXHAUSTIVE',
+            'do_copy_in_default_stream': True,
+        }
+        providers = []
+        if 'CUDAExecutionProvider' in self.providers:
+            providers.append(('CUDAExecutionProvider', cuda_opts))
+        providers.append('CPUExecutionProvider')
+
+        try:
+            sess = rt.InferenceSession(model_path, self.sess_options, providers=providers)
+            actual = sess.get_providers()
+            gpu_used = any('CUDA' in p or 'Tensorrt' in p for p in actual)
+            print(f"[Refacer]   {name:15s} → actual providers: {actual}  {'🟢 GPU' if gpu_used else '🔴 CPU only'}")
+            if not gpu_used and 'CUDAExecutionProvider' in self.providers:
+                print(f"[Refacer]   ⚠️  {name}: CUDA EP was requested but session fell back to CPU. "
+                      "This usually means CUDA EP initialization failed silently (cuDNN version mismatch).")
+            return sess
+        except Exception as e:
+            print(f"[Refacer]   ❌  {name}: Failed to create session with providers {providers}: {e}")
+            print(f"[Refacer]   🔄  Falling back to CPUExecutionProvider only.")
+            sess = rt.InferenceSession(model_path, self.sess_options, providers=['CPUExecutionProvider'])
+            actual = sess.get_providers()
+            print(f"[Refacer]   {name:15s} → actual providers: {actual}  🔴 CPU only (fallback)")
+            return sess
 
     def __init_apps(self):
         assets_dir = ensure_available('models', 'buffalo_l', root='~/.insightface')
 
         model_path = os.path.join(assets_dir, 'det_10g.onnx')
-        sess_face = rt.InferenceSession(model_path, self.sess_options, providers=self.providers)
-        print(f"Face Detector providers: {sess_face.get_providers()}")
+        sess_face = self._make_session(model_path, 'FaceDetector')
         self.face_detector = SCRFD(model_path, sess_face)
         self.face_detector.prepare(0, input_size=(640, 640))
 
         model_path = os.path.join(assets_dir, 'w600k_r50.onnx')
-        sess_rec = rt.InferenceSession(model_path, self.sess_options, providers=self.providers)
-        print(f"Face Recognizer providers: {sess_rec.get_providers()}")
+        sess_rec = self._make_session(model_path, 'FaceRecognizer')
         self.rec_app = ArcFaceONNX(model_path, sess_rec)
         self.rec_app.prepare(0)
 
@@ -186,10 +217,10 @@ class Refacer:
             except Exception as e:
                 raise RuntimeError(f"Failed to download {model_path}. Error: {e}")
 
-        sess_swap = rt.InferenceSession(model_path, self.sess_options, providers=self.providers)
-        print(f"Face Swapper providers: {sess_swap.get_providers()}")
+        sess_swap = self._make_session(model_path, 'FaceSwapper')
         self.face_swapper = INSwapper(model_path, sess_swap)
 
+    # ----- the rest of the original methods (unchanged) -----
     def prepare_faces(self, faces, disable_similarity=False, multiple_faces_mode=False):
         self.replacement_faces = []
         self.disable_similarity = disable_similarity
@@ -238,7 +269,7 @@ class Refacer:
         faces = self.__get_faces(frame, max_num=0)
         if not faces:
             return frame
-    
+   
         if self.disable_similarity:
             for face in faces:
                 swapped = self.face_swapper.get(frame, face, self.replacement_faces[0][1], paste_back=True)
@@ -309,33 +340,33 @@ class Refacer:
         original_name = osp.splitext(osp.basename(video_path))[0]
         timestamp = str(int(time.time()))
         filename = f"{original_name}_preview.mp4" if preview else f"{original_name}_{timestamp}.mp4"
-    
+   
         self.__check_video_has_audio(video_path)
-    
+   
         if preview:
             os.makedirs("output/preview", exist_ok=True)
             output_video_path = os.path.join('output', 'preview', filename)
         else:
             os.makedirs("output", exist_ok=True)
             output_video_path = os.path.join('output', filename)
-    
+   
         self.prepare_faces(faces, disable_similarity=disable_similarity, multiple_faces_mode=multiple_faces_mode)
         self.first_face = False if multiple_faces_mode else (faces[0].get("origin") is None or disable_similarity)
         self.partial_reface_ratio = partial_reface_ratio
-    
+   
         cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
+   
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
-    
+   
         frames = []
         frame_index = 0
         skip_rate = 10 if preview else 1
-    
+   
         with tqdm(total=total_frames, desc="Extracting frames") as pbar:
             while cap.isOpened():
                 flag, frame = cap.read()
@@ -349,29 +380,27 @@ class Refacer:
                         gc.collect()
                 frame_index += 1
                 pbar.update()
-    
+   
         cap.release()
         if frames:
             self.reface_group(faces, frames, output)
         output.release()
-    
+   
         converted_path = self.__convert_video(video_path, output_video_path, preview=preview)
-    
+   
         if video_path.lower().endswith(".gif"):
             if preview:
                 gif_output_path = os.path.join("output", "preview", os.path.basename(converted_path).replace(".mp4", ".gif"))
             else:
                 gif_output_path = os.path.join("output", "gifs", os.path.basename(converted_path).replace(".mp4", ".gif"))
-    
+   
             self.__generate_gif(converted_path, gif_output_path)
             return converted_path, gif_output_path
-    
-        return converted_path, None
-    
    
-  
-
-
+        return converted_path, None
+   
+ 
+ 
     def __generate_gif(self, video_path, gif_output_path):
         os.makedirs(os.path.dirname(gif_output_path), exist_ok=True)
         print(f"Generating GIF at {gif_output_path}")
