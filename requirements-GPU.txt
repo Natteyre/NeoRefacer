@@ -1,4 +1,4 @@
-ffmpeg_python==0.2.0
+ffmpeg-python==0.2.0
 imageio[ffmpeg]==2.37.0
 imagecodecs==2025.3.30
 gradio==5.22.0
@@ -6,12 +6,12 @@ insightface==0.7.3
 numpy>=1.26.0
 onnx==1.14.0
 onnxruntime-gpu==1.24.4
-opencv_python==4.7.0.72
-opencv_python_headless==4.7.0.72
-scikit-image==0.20.0
+opencv-python==4.7.0.72
+opencv-python-headless==4.7.0.72
+scikit-image>=0.22.0
 tqdm==4.67.1
 psutil==7.0.0
-ngrok==1.4.0
+pyngrok==1.4.0
 pyfiglet==1.0.2
 # codeformer dependencies
 # torch==2.6.0
